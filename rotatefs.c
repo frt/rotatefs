@@ -74,12 +74,19 @@ int save_older (const char *fpath, const struct stat *sb, int typeflag, struct F
     return 0;
 }
 
-void delete_oldest()
+int delete_oldest()
 {
-    if (nftw(argv[1], save_older, FOPEN_MAX, FTW_MOUNT | FTW_PHYS) != 0) 
+    if (nftw(argv[1], save_older, FOPEN_MAX, FTW_MOUNT | FTW_PHYS) != 0) {
         perror("error ocurred: ");
+        return -errno;
+    }
 
-    printf("oldest file: %s\n", oldest_path);   // TODO: remove the file
+    return xmp_unlink(oldest_path);
+}
+
+size_t device_size()
+{
+    // TODO
 }
 
 static void *xmp_init(struct fuse_conn_info *conn,
@@ -451,25 +458,28 @@ static int xmp_read_buf(const char *path, struct fuse_bufvec **bufp,
 	return 0;
 }
 
-// TODO: remove oldest if ENOSPC
 static int xmp_write(const char *path, const char *buf, size_t size,
 		     off_t offset, struct fuse_file_info *fi)
 {
 	int res;
 
 	(void) path;
-	res = pwrite(fi->fh, buf, size, offset);
+
+        for (res = pwrite(fi->fh, buf, size, offset), res == -1 && errno == ENOSPC, res = pwrite(fi->fh, buf, size, offset))
+            if (delete_oldest() != 0)   // TODO: don't do this if "size" is greater than the total space of the mounted device
+                break;
+	
 	if (res == -1)
 		res = -errno;
 
 	return res;
 }
 
-// TODO: remove oldest if ENOSPC
 static int xmp_write_buf(const char *path, struct fuse_bufvec *buf,
 		     off_t offset, struct fuse_file_info *fi)
 {
 	struct fuse_bufvec dst = FUSE_BUFVEC_INIT(fuse_buf_size(buf));
+        int res;
 
 	(void) path;
 
@@ -477,7 +487,11 @@ static int xmp_write_buf(const char *path, struct fuse_bufvec *buf,
 	dst.buf[0].fd = fi->fh;
 	dst.buf[0].pos = offset;
 
-	return fuse_buf_copy(&dst, buf, FUSE_BUF_SPLICE_NONBLOCK);
+        for (res = fuse_buf_copy(&dst, buf, FUSE_BUF_SPLICE_NONBLOCK), res == -ENOSPC, res = fuse_buf_copy(&dst, buf, FUSE_BUF_SPLICE_NONBLOCK))
+            if (delete_oldest() != 0)   // TODO: don't do this if "fuse_buf_size(buf)" is greater than the total space of the mounted device
+                break;
+
+	return res;
 }
 
 static int xmp_statfs(const char *path, struct statvfs *stbuf)
