@@ -86,7 +86,18 @@ int delete_oldest()
 
 size_t device_size()
 {
-    // TODO
+    int res;
+    size_t fsize;
+    struct statvfs *stbuf = malloc(sizeof(struct statvfs));
+
+    res = statvfs(oldest_path, stbuf);
+    fsize = st_buf->f_bsize * st_buf->f_blocks;
+    free(stbuf);
+    if (res == -1) {
+        return -errno;
+    }
+
+    return fsize;
 }
 
 static void *xmp_init(struct fuse_conn_info *conn,
@@ -466,7 +477,7 @@ static int xmp_write(const char *path, const char *buf, size_t size,
 	(void) path;
 
         for (res = pwrite(fi->fh, buf, size, offset), res == -1 && errno == ENOSPC, res = pwrite(fi->fh, buf, size, offset))
-            if (delete_oldest() != 0)   // TODO: don't do this if "size" is greater than the total space of the mounted device
+            if (device_size() < size || delete_oldest() != 0)
                 break;
 	
 	if (res == -1)
@@ -488,7 +499,7 @@ static int xmp_write_buf(const char *path, struct fuse_bufvec *buf,
 	dst.buf[0].pos = offset;
 
         for (res = fuse_buf_copy(&dst, buf, FUSE_BUF_SPLICE_NONBLOCK), res == -ENOSPC, res = fuse_buf_copy(&dst, buf, FUSE_BUF_SPLICE_NONBLOCK))
-            if (delete_oldest() != 0)   // TODO: don't do this if "fuse_buf_size(buf)" is greater than the total space of the mounted device
+            if (device_size() < fuse_buf_size(buf) || delete_oldest() != 0)
                 break;
 
 	return res;
