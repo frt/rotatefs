@@ -1,29 +1,13 @@
-/*
-  FUSE: Filesystem in Userspace
-  Copyright (C) 2001-2007  Miklos Szeredi <miklos@szeredi.hu>
-  Copyright (C) 2011       Sebastian Pipping <sebastian@pipping.org>
-
-  This program can be distributed under the terms of the GNU GPL.
-  See the file COPYING.
-*/
-
 /** @file
- *
- * This file system mirrors the existing file system hierarchy of the
- * system, starting at the root file system. This is implemented by
- * just "passing through" all requests to the corresponding user-space
- * libc functions. This implementation is a little more sophisticated
- * than the one in passthrough.c, so performance is not quite as bad.
  *
  * Compile with:
  *
- *     gcc -Wall passthrough_fh.c `pkg-config fuse3 --cflags --libs` -lulockmgr -o passthrough_fh
+ *     gcc -Wall rotatefs.c `pkg-config fuse3 --cflags --libs` -lulockmgr -o rotatefs
  *
- * ## Source code ##
- * \include passthrough_fh.c
  */
 
-#define FUSE_USE_VERSION 31
+#define _FILE_OFFSET_BITS 64
+#define FUSE_USE_VERSION 29
 
 #ifdef HAVE_CONFIG_H
 #include <config.h>
@@ -56,7 +40,13 @@
 #include <limits.h>
 #include <sys/types.h>
 
-static char oldest_path[PATH_MAX];
+struct rfs_state {
+    char *rootdir;
+    char oldest_path[PATH_MAX];
+};
+#define RFS_DATA ((struct rfs_state *) fuse_get_context()->private_data)
+
+static int xmp_unlink(const char *path);
 
 int save_older (const char *fpath, const struct stat *sb, int typeflag, struct FTW *ftwbuf)
 {
@@ -66,7 +56,7 @@ int save_older (const char *fpath, const struct stat *sb, int typeflag, struct F
     if (typeflag != FTW_F) return 0;
 
     if (files_traversed == 0 || sb->st_mtime < oldest_mtime) {
-        strcpy(oldest_path, fpath);
+        strcpy(RFS_DATA->oldest_path, fpath);
         oldest_mtime = sb->st_mtime;
         files_traversed++;
     }
@@ -76,12 +66,12 @@ int save_older (const char *fpath, const struct stat *sb, int typeflag, struct F
 
 int delete_oldest()
 {
-    if (nftw(argv[1], save_older, FOPEN_MAX, FTW_MOUNT | FTW_PHYS) != 0) {
+    if (nftw(RFS_DATA->rootdir, save_older, FOPEN_MAX, FTW_MOUNT | FTW_PHYS) != 0) {
         perror("error ocurred: ");
         return -errno;
     }
 
-    return xmp_unlink(oldest_path);
+    return xmp_unlink(RFS_DATA->oldest_path);
 }
 
 size_t device_size()
@@ -90,8 +80,8 @@ size_t device_size()
     size_t fsize;
     struct statvfs *stbuf = malloc(sizeof(struct statvfs));
 
-    res = statvfs(oldest_path, stbuf);
-    fsize = st_buf->f_bsize * st_buf->f_blocks;
+    res = statvfs(RFS_DATA->oldest_path, stbuf);
+    fsize = stbuf->f_bsize * stbuf->f_blocks;
     free(stbuf);
     if (res == -1) {
         return -errno;
@@ -100,38 +90,20 @@ size_t device_size()
     return fsize;
 }
 
-static void *xmp_init(struct fuse_conn_info *conn,
-		      struct fuse_config *cfg)
+static void *xmp_init(struct fuse_conn_info *conn)
 {
 	(void) conn;
-	cfg->use_ino = 1;
-	cfg->nullpath_ok = 1;
 
-	/* Pick up changes from lower filesystem right away. This is
-	   also necessary for better hardlink support. When the kernel
-	   calls the unlink() handler, it does not know the inode of
-	   the to-be-removed entry and can therefore not invalidate
-	   the cache of the associated inode - resulting in an
-	   incorrect st_nlink value being reported for any remaining
-	   hardlinks to this inode. */
-	cfg->entry_timeout = 0;
-	cfg->attr_timeout = 0;
-	cfg->negative_timeout = 0;
-
-	return NULL;
+	return RFS_DATA;
 }
 
-static int xmp_getattr(const char *path, struct stat *stbuf,
-			struct fuse_file_info *fi)
+static int xmp_getattr(const char *path, struct stat *stbuf)
 {
 	int res;
 
 	(void) path;
 
-	if(fi)
-		res = fstat(fi->fh, stbuf);
-	else
-		res = lstat(path, stbuf);
+        res = lstat(path, stbuf);
 	if (res == -1)
 		return -errno;
 
@@ -193,8 +165,7 @@ static inline struct xmp_dirp *get_dirp(struct fuse_file_info *fi)
 }
 
 static int xmp_readdir(const char *path, void *buf, fuse_fill_dir_t filler,
-		       off_t offset, struct fuse_file_info *fi,
-		       enum fuse_readdir_flags flags)
+		       off_t offset, struct fuse_file_info *fi)
 {
 	struct xmp_dirp *d = get_dirp(fi);
 
@@ -211,29 +182,12 @@ static int xmp_readdir(const char *path, void *buf, fuse_fill_dir_t filler,
 		d->offset = offset;
 	}
 	while (1) {
-		struct stat st;
 		off_t nextoff;
-		enum fuse_fill_dir_flags fill_flags = 0;
 
 		if (!d->entry) {
 			d->entry = readdir(d->dp);
 			if (!d->entry)
 				break;
-		}
-#ifdef HAVE_FSTATAT
-		if (flags & FUSE_READDIR_PLUS) {
-			int res;
-
-			res = fstatat(dirfd(d->dp), d->entry->d_name, &st,
-				      AT_SYMLINK_NOFOLLOW);
-			if (res != -1)
-				fill_flags |= FUSE_FILL_DIR_PLUS;
-		}
-#endif
-		if (!(fill_flags & FUSE_FILL_DIR_PLUS)) {
-			memset(&st, 0, sizeof(st));
-			st.st_ino = d->entry->d_ino;
-			st.st_mode = d->entry->d_type << 12;
 		}
 		nextoff = telldir(d->dp);
 #ifdef __FreeBSD__		
@@ -243,8 +197,6 @@ static int xmp_readdir(const char *path, void *buf, fuse_fill_dir_t filler,
 		   everything by one. */
 		nextoff++;
 #endif
-		if (filler(buf, d->entry->d_name, &st, nextoff, fill_flags))
-			break;
 
 		d->entry = NULL;
 		d->offset = nextoff;
@@ -320,13 +272,9 @@ static int xmp_symlink(const char *from, const char *to)
 	return 0;
 }
 
-static int xmp_rename(const char *from, const char *to, unsigned int flags)
+static int xmp_rename(const char *from, const char *to)
 {
 	int res;
-
-	/* When we have renameat2() in libc, then we can implement flags */
-	if (flags)
-		return -EINVAL;
 
 	res = rename(from, to);
 	if (res == -1)
@@ -346,46 +294,33 @@ static int xmp_link(const char *from, const char *to)
 	return 0;
 }
 
-static int xmp_chmod(const char *path, mode_t mode,
-		     struct fuse_file_info *fi)
+static int xmp_chmod(const char *path, mode_t mode)
 {
 	int res;
 
-	if(fi)
-		res = fchmod(fi->fh, mode);
-	else
-		res = chmod(path, mode);
+        res = chmod(path, mode);
 	if (res == -1)
 		return -errno;
 
 	return 0;
 }
 
-static int xmp_chown(const char *path, uid_t uid, gid_t gid,
-		     struct fuse_file_info *fi)
+static int xmp_chown(const char *path, uid_t uid, gid_t gid)
 {
 	int res;
 
-	if (fi)
-		res = fchown(fi->fh, uid, gid);
-	else
-		res = lchown(path, uid, gid);
+        res = lchown(path, uid, gid);
 	if (res == -1)
 		return -errno;
 
 	return 0;
 }
 
-static int xmp_truncate(const char *path, off_t size,
-			 struct fuse_file_info *fi)
+static int xmp_truncate(const char *path, off_t size)
 {
 	int res;
 
-	if(fi)
-		res = ftruncate(fi->fh, size);
-	else
-		res = truncate(path, size);
-
+        res = truncate(path, size);
 	if (res == -1)
 		return -errno;
 
@@ -476,7 +411,7 @@ static int xmp_write(const char *path, const char *buf, size_t size,
 
 	(void) path;
 
-        for (res = pwrite(fi->fh, buf, size, offset), res == -1 && errno == ENOSPC, res = pwrite(fi->fh, buf, size, offset))
+        for (res = pwrite(fi->fh, buf, size, offset); res == -1 && errno == ENOSPC; res = pwrite(fi->fh, buf, size, offset))
             if (device_size() < size || delete_oldest() != 0)
                 break;
 	
@@ -498,7 +433,7 @@ static int xmp_write_buf(const char *path, struct fuse_bufvec *buf,
 	dst.buf[0].fd = fi->fh;
 	dst.buf[0].pos = offset;
 
-        for (res = fuse_buf_copy(&dst, buf, FUSE_BUF_SPLICE_NONBLOCK), res == -ENOSPC, res = fuse_buf_copy(&dst, buf, FUSE_BUF_SPLICE_NONBLOCK))
+        for (res = fuse_buf_copy(&dst, buf, FUSE_BUF_SPLICE_NONBLOCK); res == -ENOSPC; res = fuse_buf_copy(&dst, buf, FUSE_BUF_SPLICE_NONBLOCK))
             if (device_size() < fuse_buf_size(buf) || delete_oldest() != 0)
                 break;
 
@@ -680,8 +615,37 @@ static struct fuse_operations xmp_oper = {
 	.flock		= xmp_flock,
 };
 
+void rfs_usage()
+{
+    fprintf(stderr, "usage:  rotatefs [FUSE and mount options] rootDir mountPoint\n");
+    abort();
+}
+
 int main(int argc, char *argv[])
 {
-	umask(0);
-	return fuse_main(argc, argv, &xmp_oper, NULL);
+    struct rfs_state *rfs_data;
+
+    umask(0);
+
+    // Perform some sanity checking on the command line:  make sure
+    // there are enough arguments, and that neither of the last two
+    // start with a hyphen (this will break if you actually have a
+    // rootpoint or mountpoint whose name starts with a hyphen, but so
+    // will a zillion other programs)
+    if ((argc < 3) || (argv[argc-2][0] == '-') || (argv[argc-1][0] == '-'))
+        rfs_usage();
+
+    rfs_data = malloc(sizeof(struct rfs_state));
+    if (rfs_data == NULL) {
+	perror("main calloc");
+	abort();
+    }
+    // Pull the rootdir out of the argument list and save it in my
+    // internal data
+    rfs_data->rootdir = realpath(argv[argc-2], NULL);
+    argv[argc-2] = argv[argc-1];
+    argv[argc-1] = NULL;
+    argc--;
+
+    return fuse_main(argc, argv, &xmp_oper, NULL);
 }
