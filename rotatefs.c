@@ -101,9 +101,21 @@ static int xmp_getattr(const char *path, struct stat *stbuf)
 {
 	int res;
 
+	res = lstat(path, stbuf);
+	if (res == -1)
+		return -errno;
+
+	return 0;
+}
+
+static int xmp_fgetattr(const char *path, struct stat *stbuf,
+			struct fuse_file_info *fi)
+{
+	int res;
+
 	(void) path;
 
-        res = lstat(path, stbuf);
+	res = fstat(fi->fh, stbuf);
 	if (res == -1)
 		return -errno;
 
@@ -171,17 +183,12 @@ static int xmp_readdir(const char *path, void *buf, fuse_fill_dir_t filler,
 
 	(void) path;
 	if (offset != d->offset) {
-#ifndef __FreeBSD__
 		seekdir(d->dp, offset);
-#else
-		/* Subtract the one that we add when calling
-		   telldir() below */
-		seekdir(d->dp, offset-1);
-#endif
 		d->entry = NULL;
 		d->offset = offset;
 	}
 	while (1) {
+		struct stat st;
 		off_t nextoff;
 
 		if (!d->entry) {
@@ -189,14 +196,13 @@ static int xmp_readdir(const char *path, void *buf, fuse_fill_dir_t filler,
 			if (!d->entry)
 				break;
 		}
+
+		memset(&st, 0, sizeof(st));
+		st.st_ino = d->entry->d_ino;
+		st.st_mode = d->entry->d_type << 12;
 		nextoff = telldir(d->dp);
-#ifdef __FreeBSD__		
-		/* Under FreeBSD, telldir() may return 0 the first time
-		   it is called. But for libfuse, an offset of zero
-		   means that offsets are not supported, so we shift
-		   everything by one. */
-		nextoff++;
-#endif
+		if (filler(buf, d->entry->d_name, &st, nextoff))
+			break;
 
 		d->entry = NULL;
 		d->offset = nextoff;
@@ -320,7 +326,21 @@ static int xmp_truncate(const char *path, off_t size)
 {
 	int res;
 
-        res = truncate(path, size);
+	res = truncate(path, size);
+	if (res == -1)
+		return -errno;
+
+	return 0;
+}
+
+static int xmp_ftruncate(const char *path, off_t size,
+			 struct fuse_file_info *fi)
+{
+	int res;
+
+	(void) path;
+
+	res = ftruncate(fi->fh, size);
 	if (res == -1)
 		return -errno;
 
@@ -572,6 +592,7 @@ static int xmp_flock(const char *path, struct fuse_file_info *fi, int op)
 static struct fuse_operations xmp_oper = {
 	.init           = xmp_init,
 	.getattr	= xmp_getattr,
+	.fgetattr	= xmp_fgetattr,
 	.access		= xmp_access,
 	.readlink	= xmp_readlink,
 	.opendir	= xmp_opendir,
@@ -587,6 +608,7 @@ static struct fuse_operations xmp_oper = {
 	.chmod		= xmp_chmod,
 	.chown		= xmp_chown,
 	.truncate	= xmp_truncate,
+	.ftruncate	= xmp_ftruncate,
 #ifdef HAVE_UTIMENSAT
 	.utimens	= xmp_utimens,
 #endif
