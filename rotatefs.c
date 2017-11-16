@@ -2,7 +2,7 @@
  *
  * Compile with:
  *
- *     gcc -Wall rotatefs.c `pkg-config fuse3 --cflags --libs` -lulockmgr -o rotatefs
+ *     gcc -Wall rotatefs.c `pkg-config fuse --cflags --libs` -lulockmgr -o rotatefs
  *
  */
 
@@ -43,22 +43,20 @@
 struct rfs_state {
     char *rootdir;
     char oldest_path[PATH_MAX];
+    int files_traversed;
+    time_t oldest_mtime;
 };
 #define RFS_DATA ((struct rfs_state *) fuse_get_context()->private_data)
 
-static int xmp_unlink(const char *path);
-
 int save_older (const char *fpath, const struct stat *sb, int typeflag, struct FTW *ftwbuf)
 {
-    static int files_traversed = 0;
-    static time_t oldest_mtime;
 
     if (typeflag != FTW_F) return 0;
 
-    if (files_traversed == 0 || sb->st_mtime < oldest_mtime) {
+    if (RFS_DATA->files_traversed == 0 || sb->st_mtime < RFS_DATA->oldest_mtime) {
         strcpy(RFS_DATA->oldest_path, fpath);
-        oldest_mtime = sb->st_mtime;
-        files_traversed++;
+        RFS_DATA->oldest_mtime = sb->st_mtime;
+        RFS_DATA->files_traversed++;
     }
 
     return 0;
@@ -66,12 +64,21 @@ int save_older (const char *fpath, const struct stat *sb, int typeflag, struct F
 
 int delete_oldest()
 {
+    int res;
+
     if (nftw(RFS_DATA->rootdir, save_older, FOPEN_MAX, FTW_MOUNT | FTW_PHYS) != 0) {
         perror("error ocurred: ");
         return -errno;
     }
 
-    return xmp_unlink(RFS_DATA->oldest_path);
+    res = unlink(RFS_DATA->oldest_path);
+    if (res == -1)
+        return -errno;
+
+    /* after the file deleted, will need to search for the oldest file again. */
+    RFS_DATA->files_traversed = 0;
+
+    return 0;
 }
 
 size_t device_size()
@@ -485,9 +492,12 @@ static int xmp_write(const char *path, const char *buf, size_t size,
 
 	(void) path;
 
-        for (res = pwrite(fi->fh, buf, size, offset); res == -1 && errno == ENOSPC; res = pwrite(fi->fh, buf, size, offset))
-            if (device_size() < size || delete_oldest() != 0)
+        for (res = pwrite(fi->fh, buf, size, offset); res == -1 && errno == ENOSPC; res = pwrite(fi->fh, buf, size, offset)) {
+            fprintf(stderr, "device_size: %ld; size: %ld\n", device_size(), size);
+            if (device_size() < size || delete_oldest() != 0) {
                 break;
+            }
+        }
 	
 	if (res == -1)
 		res = -errno;
@@ -507,9 +517,12 @@ static int xmp_write_buf(const char *path, struct fuse_bufvec *buf,
 	dst.buf[0].fd = fi->fh;
 	dst.buf[0].pos = offset;
 
-        for (res = fuse_buf_copy(&dst, buf, FUSE_BUF_SPLICE_NONBLOCK); res == -ENOSPC; res = fuse_buf_copy(&dst, buf, FUSE_BUF_SPLICE_NONBLOCK))
-            if (device_size() < fuse_buf_size(buf) || delete_oldest() != 0)
+        for (res = fuse_buf_copy(&dst, buf, FUSE_BUF_SPLICE_NONBLOCK); res == -ENOSPC; res = fuse_buf_copy(&dst, buf, FUSE_BUF_SPLICE_NONBLOCK)) {
+            fprintf(stderr, "device_size: %ld; fuse_buf_size(buf): %ld\n", device_size(), fuse_buf_size(buf));
+            if (device_size() < fuse_buf_size(buf) || delete_oldest() != 0) {
                 break;
+            }
+        }
 
 	return res;
 }
@@ -742,10 +755,10 @@ int main(int argc, char *argv[])
     argc--;
     fprintf(stderr, "rootdir: %s\n", rfs_data->rootdir);
 
+    rfs_data->files_traversed = 0;
+
     // turn over control to fuse
-    fprintf(stderr, "about to call fuse_main\n");
     fuse_stat = fuse_main(argc, argv, &xmp_oper, rfs_data);
-    fprintf(stderr, "fuse_main returned %d\n", fuse_stat);
     
     return fuse_stat;
 }
