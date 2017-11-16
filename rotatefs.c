@@ -90,6 +90,18 @@ size_t device_size()
     return fsize;
 }
 
+//  All the paths I see are relative to the root of the mounted
+//  filesystem.  In order to get to the underlying filesystem, I need to
+//  have the mountpoint.  I'll save it away early on in main(), and then
+//  whenever I need a path for something I'll call this to construct
+//  it.
+static void fullpath(char fpath[PATH_MAX], const char *path)
+{
+    strcpy(fpath, RFS_DATA->rootdir);
+    strncat(fpath, path, PATH_MAX); // ridiculously long paths will
+				    // break here
+}
+
 static void *xmp_init(struct fuse_conn_info *conn)
 {
 	(void) conn;
@@ -100,8 +112,10 @@ static void *xmp_init(struct fuse_conn_info *conn)
 static int xmp_getattr(const char *path, struct stat *stbuf)
 {
 	int res;
+        char fpath[PATH_MAX];
 
-	res = lstat(path, stbuf);
+        fullpath(fpath, path);
+	res = lstat(fpath, stbuf);
 	if (res == -1)
 		return -errno;
 
@@ -125,8 +139,10 @@ static int xmp_fgetattr(const char *path, struct stat *stbuf,
 static int xmp_access(const char *path, int mask)
 {
 	int res;
+        char fpath[PATH_MAX];
 
-	res = access(path, mask);
+        fullpath(fpath, path);
+	res = access(fpath, mask);
 	if (res == -1)
 		return -errno;
 
@@ -136,8 +152,10 @@ static int xmp_access(const char *path, int mask)
 static int xmp_readlink(const char *path, char *buf, size_t size)
 {
 	int res;
+        char fpath[PATH_MAX];
 
-	res = readlink(path, buf, size - 1);
+        fullpath(fpath, path);
+	res = readlink(fpath, buf, size - 1);
 	if (res == -1)
 		return -errno;
 
@@ -154,11 +172,14 @@ struct xmp_dirp {
 static int xmp_opendir(const char *path, struct fuse_file_info *fi)
 {
 	int res;
+        char fpath[PATH_MAX];
+
+        fullpath(fpath, path);
 	struct xmp_dirp *d = malloc(sizeof(struct xmp_dirp));
 	if (d == NULL)
 		return -ENOMEM;
 
-	d->dp = opendir(path);
+	d->dp = opendir(fpath);
 	if (d->dp == NULL) {
 		res = -errno;
 		free(d);
@@ -223,11 +244,13 @@ static int xmp_releasedir(const char *path, struct fuse_file_info *fi)
 static int xmp_mknod(const char *path, mode_t mode, dev_t rdev)
 {
 	int res;
+        char fpath[PATH_MAX];
 
+        fullpath(fpath, path);
 	if (S_ISFIFO(mode))
-		res = mkfifo(path, mode);
+		res = mkfifo(fpath, mode);
 	else
-		res = mknod(path, mode, rdev);
+		res = mknod(fpath, mode, rdev);
 	if (res == -1)
 		return -errno;
 
@@ -237,8 +260,10 @@ static int xmp_mknod(const char *path, mode_t mode, dev_t rdev)
 static int xmp_mkdir(const char *path, mode_t mode)
 {
 	int res;
+        char fpath[PATH_MAX];
 
-	res = mkdir(path, mode);
+        fullpath(fpath, path);
+	res = mkdir(fpath, mode);
 	if (res == -1)
 		return -errno;
 
@@ -248,8 +273,10 @@ static int xmp_mkdir(const char *path, mode_t mode)
 static int xmp_unlink(const char *path)
 {
 	int res;
+        char fpath[PATH_MAX];
 
-	res = unlink(path);
+        fullpath(fpath, path);
+	res = unlink(fpath);
 	if (res == -1)
 		return -errno;
 
@@ -259,8 +286,10 @@ static int xmp_unlink(const char *path)
 static int xmp_rmdir(const char *path)
 {
 	int res;
+        char fpath[PATH_MAX];
 
-	res = rmdir(path);
+        fullpath(fpath, path);
+	res = rmdir(fpath);
 	if (res == -1)
 		return -errno;
 
@@ -270,8 +299,12 @@ static int xmp_rmdir(const char *path)
 static int xmp_symlink(const char *from, const char *to)
 {
 	int res;
+        char ffrom[PATH_MAX];
+        char fto[PATH_MAX];
 
-	res = symlink(from, to);
+        fullpath(ffrom, from);
+        fullpath(fto, to);
+	res = symlink(ffrom, fto);
 	if (res == -1)
 		return -errno;
 
@@ -281,8 +314,12 @@ static int xmp_symlink(const char *from, const char *to)
 static int xmp_rename(const char *from, const char *to)
 {
 	int res;
+        char ffrom[PATH_MAX];
+        char fto[PATH_MAX];
 
-	res = rename(from, to);
+        fullpath(ffrom, from);
+        fullpath(fto, to);
+	res = rename(ffrom, fto);
 	if (res == -1)
 		return -errno;
 
@@ -292,8 +329,12 @@ static int xmp_rename(const char *from, const char *to)
 static int xmp_link(const char *from, const char *to)
 {
 	int res;
+        char ffrom[PATH_MAX];
+        char fto[PATH_MAX];
 
-	res = link(from, to);
+        fullpath(ffrom, from);
+        fullpath(fto, to);
+	res = link(ffrom, fto);
 	if (res == -1)
 		return -errno;
 
@@ -303,8 +344,10 @@ static int xmp_link(const char *from, const char *to)
 static int xmp_chmod(const char *path, mode_t mode)
 {
 	int res;
+        char fpath[PATH_MAX];
 
-        res = chmod(path, mode);
+        fullpath(fpath, path);
+        res = chmod(fpath, mode);
 	if (res == -1)
 		return -errno;
 
@@ -314,8 +357,10 @@ static int xmp_chmod(const char *path, mode_t mode)
 static int xmp_chown(const char *path, uid_t uid, gid_t gid)
 {
 	int res;
+        char fpath[PATH_MAX];
 
-        res = lchown(path, uid, gid);
+        fullpath(fpath, path);
+        res = lchown(fpath, uid, gid);
 	if (res == -1)
 		return -errno;
 
@@ -325,8 +370,10 @@ static int xmp_chown(const char *path, uid_t uid, gid_t gid)
 static int xmp_truncate(const char *path, off_t size)
 {
 	int res;
+        char fpath[PATH_MAX];
 
-	res = truncate(path, size);
+        fullpath(fpath, path);
+	res = truncate(fpath, size);
 	if (res == -1)
 		return -errno;
 
@@ -352,14 +399,17 @@ static int xmp_utimens(const char *path, const struct timespec ts[2],
 		       struct fuse_file_info *fi)
 {
 	int res;
+        char fpath[PATH_MAX];
 
 	/* don't use utime/utimes since they follow symlinks */
 	if (fi)
-		res = futimens(fi->fh, ts);
-	else
-		res = utimensat(0, path, ts, AT_SYMLINK_NOFOLLOW);
+            res = futimens(fi->fh, ts);
+        else {
+            fullpath(fpath, path);
+            res = utimensat(0, path, ts, AT_SYMLINK_NOFOLLOW);
+        }
 	if (res == -1)
-		return -errno;
+            return -errno;
 
 	return 0;
 }
@@ -368,8 +418,10 @@ static int xmp_utimens(const char *path, const struct timespec ts[2],
 static int xmp_create(const char *path, mode_t mode, struct fuse_file_info *fi)
 {
 	int fd;
+        char fpath[PATH_MAX];
 
-	fd = open(path, fi->flags, mode);
+        fullpath(fpath, path);
+	fd = open(fpath, fi->flags, mode);
 	if (fd == -1)
 		return -errno;
 
@@ -380,8 +432,10 @@ static int xmp_create(const char *path, mode_t mode, struct fuse_file_info *fi)
 static int xmp_open(const char *path, struct fuse_file_info *fi)
 {
 	int fd;
+        char fpath[PATH_MAX];
 
-	fd = open(path, fi->flags);
+        fullpath(fpath, path);
+	fd = open(fpath, fi->flags);
 	if (fd == -1)
 		return -errno;
 
@@ -463,8 +517,10 @@ static int xmp_write_buf(const char *path, struct fuse_bufvec *buf,
 static int xmp_statfs(const char *path, struct statvfs *stbuf)
 {
 	int res;
+        char fpath[PATH_MAX];
 
-	res = statvfs(path, stbuf);
+        fullpath(fpath, path);
+	res = statvfs(fpath, stbuf);
 	if (res == -1)
 		return -errno;
 
@@ -534,7 +590,10 @@ static int xmp_fallocate(const char *path, int mode,
 static int xmp_setxattr(const char *path, const char *name, const char *value,
 			size_t size, int flags)
 {
-	int res = lsetxattr(path, name, value, size, flags);
+        char fpath[PATH_MAX];
+
+        fullpath(fpath, path);
+	int res = lsetxattr(fpath, name, value, size, flags);
 	if (res == -1)
 		return -errno;
 	return 0;
@@ -543,7 +602,10 @@ static int xmp_setxattr(const char *path, const char *name, const char *value,
 static int xmp_getxattr(const char *path, const char *name, char *value,
 			size_t size)
 {
-	int res = lgetxattr(path, name, value, size);
+        char fpath[PATH_MAX];
+
+        fullpath(fpath, path);
+	int res = lgetxattr(fpath, name, value, size);
 	if (res == -1)
 		return -errno;
 	return res;
@@ -551,7 +613,10 @@ static int xmp_getxattr(const char *path, const char *name, char *value,
 
 static int xmp_listxattr(const char *path, char *list, size_t size)
 {
-	int res = llistxattr(path, list, size);
+        char fpath[PATH_MAX];
+
+        fullpath(fpath, path);
+	int res = llistxattr(fpath, list, size);
 	if (res == -1)
 		return -errno;
 	return res;
@@ -559,7 +624,10 @@ static int xmp_listxattr(const char *path, char *list, size_t size)
 
 static int xmp_removexattr(const char *path, const char *name)
 {
-	int res = lremovexattr(path, name);
+        char fpath[PATH_MAX];
+
+        fullpath(fpath, path);
+	int res = lremovexattr(fpath, name);
 	if (res == -1)
 		return -errno;
 	return 0;
@@ -645,9 +713,13 @@ void rfs_usage()
 
 int main(int argc, char *argv[])
 {
+    int fuse_stat;
     struct rfs_state *rfs_data;
 
     umask(0);
+
+    // See which version of fuse we're running
+    fprintf(stderr, "Fuse library version %d.%d\n", FUSE_MAJOR_VERSION, FUSE_MINOR_VERSION);
 
     // Perform some sanity checking on the command line:  make sure
     // there are enough arguments, and that neither of the last two
@@ -668,6 +740,12 @@ int main(int argc, char *argv[])
     argv[argc-2] = argv[argc-1];
     argv[argc-1] = NULL;
     argc--;
+    fprintf(stderr, "rootdir: %s\n", rfs_data->rootdir);
 
-    return fuse_main(argc, argv, &xmp_oper, NULL);
+    // turn over control to fuse
+    fprintf(stderr, "about to call fuse_main\n");
+    fuse_stat = fuse_main(argc, argv, &xmp_oper, rfs_data);
+    fprintf(stderr, "fuse_main returned %d\n", fuse_stat);
+    
+    return fuse_stat;
 }
