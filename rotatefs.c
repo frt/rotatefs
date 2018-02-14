@@ -26,6 +26,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <unistd.h>
+#include <stddef.h>
 #include <fcntl.h>
 #include <sys/stat.h>
 #include <dirent.h>
@@ -47,6 +48,10 @@ struct rfs_state {
     time_t oldest_mtime;
 };
 #define RFS_DATA ((struct rfs_state *) fuse_get_context()->private_data)
+
+static struct options {
+    size_t max_device_size;
+} options;
 
 int save_older (const char *fpath, const struct stat *sb, int typeflag, struct FTW *ftwbuf)
 {
@@ -85,6 +90,7 @@ size_t device_size()
 {
     int res;
     size_t fsize;
+    size_t max_device_size = options.max_device_size;
     struct statvfs *stbuf = malloc(sizeof(struct statvfs));
 
     res = statvfs(RFS_DATA->oldest_path, stbuf);
@@ -94,7 +100,10 @@ size_t device_size()
         return -errno;
     }
 
-    return fsize;
+    if (max_device_size > 0)
+        return (fsize < max_device_size ? fsize : max_device_size);
+    else
+        return fsize;
 }
 
 //  All the paths I see are relative to the root of the mounted
@@ -720,9 +729,16 @@ static struct fuse_operations rfs_oper = {
 
 void rfs_usage()
 {
-    fprintf(stderr, "usage:  rotatefs [FUSE and mount options] rootDir mountPoint\n");
+    fprintf(stderr, "usage:  rotatefs [FUSE and mount options] [-s <fs_size>|--size=<fs_size>] rootDir mountPoint\n");
     abort();
 }
+
+#define OPTION(t, p) { t, offsetof(struct options, p), 0 }
+static const struct fuse_opt option_spec[] = {
+    OPTION("--size=%zu", max_device_size),
+    OPTION("-s %zu", max_device_size),
+    FUSE_OPT_END
+};
 
 int main(int argc, char *argv[])
 {
@@ -755,10 +771,15 @@ int main(int argc, char *argv[])
     argc--;
     fprintf(stderr, "rootdir: %s\n", rfs_data->rootdir);
 
+    options.max_device_size = 0;    // default value
+    struct fuse_args args = FUSE_ARGS_INIT(argc, argv);
+    if (fuse_opt_parse(&args, &options, option_spec, NULL) == -1)
+        rfs_usage();
+
     rfs_data->files_traversed = 0;
 
     // turn over control to fuse
-    fuse_stat = fuse_main(argc, argv, &rfs_oper, rfs_data);
+    fuse_stat = fuse_main(args.argc, args.argv, &rfs_oper, rfs_data);
     
     return fuse_stat;
 }
