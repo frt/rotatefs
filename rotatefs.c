@@ -40,6 +40,7 @@
 #include <ftw.h>
 #include <limits.h>
 #include <sys/types.h>
+#include <libgen.h>
 
 struct rfs_state {
     char *rootdir;
@@ -68,6 +69,46 @@ int save_older (const char *fpath, const struct stat *sb, int typeflag, struct F
     return 0;
 }
 
+int rm_empty_dirs(const char *fpath)
+{
+    char path_copy[PATH_MAX];
+    char *dirpath;
+    int res = 0;
+
+    strcpy(path_copy, fpath);
+    dirpath = path_copy;
+
+    do {
+        dirpath = dirname(dirpath);
+
+        /* dirname("")    == "." (error)
+         * dirname("/")   == "/" (ok)
+         * dirname(".")   == "." (error)
+         * dirname("..")  == "." (error)
+         * dirname("a/b") == "a" (error)
+         * So, assuming the path received by this function always start with a
+         * '/', because it expects a full path. If the dirname have a lenght of
+         * 1 there is no more directories to remove, or an invalid path was
+         * given.
+         */
+        switch (strnlen(dirpath, 2)) {
+            case 0:
+                errno = EINVAL;
+                return -errno;
+            case 1:
+                if (dirpath[0] == '/')
+                    return 0;
+                else {
+                    errno = EINVAL;
+                    return -errno;
+                }
+        }
+        res = rmdir(dirpath);
+    } while(res == 0);
+
+    return (errno == ENOTEMPTY) ? 0 : -errno;
+}
+
 int delete_oldest()
 {
     int res;
@@ -84,7 +125,7 @@ int delete_oldest()
     /* after the file deleted, will need to search for the oldest file again. */
     RFS_DATA->files_traversed = 0;
 
-    return 0;
+    return rm_empty_dirs(RFS_DATA->oldest_path);
 }
 
 int sum(const char *fpath, const struct stat *sb, int typeflag) {
@@ -149,9 +190,12 @@ static void fullpath(char fpath[PATH_MAX], const char *path)
 
 static void *rfs_init(struct fuse_conn_info *conn)
 {
-	(void) conn;
+    (void) conn;
 
-	return RFS_DATA;
+    // trim filesystem to the max allowed size on initialization
+    trim_fs(0);
+
+    return RFS_DATA;
 }
 
 static int rfs_getattr(const char *path, struct stat *stbuf)
